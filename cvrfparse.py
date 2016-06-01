@@ -15,6 +15,7 @@ import copy
 import codecs
 import urllib2
 import argparse
+import logging
 from lxml import etree
 
 
@@ -31,44 +32,6 @@ class CVRF_Syntax(object):
     CVRF_SCHEMA = "http://www.icasi.org/CVRF/schema/cvrf/1.1/cvrf.xsd"
     CVRF_CATALOG = "./cvrfparse/schemata/catalog.xml"
 
-
-class PrependerAction(argparse.Action):
-    """
-    Customization for argparse. Prepends some static text to an accumalated list.
-    """
-    prepend_text = ""
-    def __call__(self, parser, namespace, values, option_string=None):
-        orig = getattr(namespace, self.dest, None)
-        items = [] if orig is None else copy.copy(orig)
-        for value in values:
-            items.append(self.prepend_text + value)
-        setattr(namespace, self.dest, items)
-
-
-class NonDupBracketFormatter(argparse.HelpFormatter):
-    """
-    Customization for argparse. A formatter that is a more terse in repeated arguments.
-    """
-    def _format_args(self, action, default_metavar):
-        get_metavar = self._metavar_formatter(action, default_metavar)
-        if action.nargs == argparse.ZERO_OR_MORE:
-            result = "[%s ...]" % get_metavar(1)
-        elif action.nargs == argparse.ONE_OR_MORE:
-            result = "%s [...]" % get_metavar(1)
-        else:
-            result = super(NonDupBracketFormatter, self)._format_args(
-                action, default_metavar)
-        return result
-
-
-def namespace_prepend(namespace):
-    """
-    Returns a dynamic class (not instance) with appropriate prepend_text.
-    """
-    return type("Prepend_%s" % namespace, (PrependerAction,),
-                {"prepend_text": CVRF_Syntax.NAMESPACES[namespace]})
-
-
 def chop_ns_prefix(element):
     """
     Return the element of a fully qualified namespace URI
@@ -76,6 +39,21 @@ def chop_ns_prefix(element):
     element: a fully qualified ET element tag
     """
     return element[element.rindex("}") + 1:]
+
+def _create_parsables(elements):
+    '''Create formatted parsable list with user entered elements'''
+    parsables = []
+    for element in elements:
+        if element in CVRF_Syntax.CVRF_ARGS:
+            args_cvrf = [CVRF_Syntax.NAMESPACES['CVRF'] + element]
+            parsables.extend(post_process_arglist(args_cvrf, 'CVRF', CVRF_Syntax.CVRF_ARGS))
+        if element in CVRF_Syntax.VULN_ARGS:
+            args_vuln = [CVRF_Syntax.NAMESPACES['VULN'] + element]
+            parsables.extend(post_process_arglist(args_vuln, 'CVRF', CVRF_Syntax.CVRF_ARGS))
+        if element in CVRF_Syntax.PROD_ARGS:
+            args_prod = [CVRF_Syntax.NAMESPACES['PROD'] + element]
+            parsables.extend(post_process_arglist(args_prod, 'PROD', CVRF_Syntax.CVRF_ARGS))
+    return parsables
 
 
 def print_node(node, strip_ns, f=sys.stdout):
@@ -127,7 +105,7 @@ def cvrf_dump(results, strip_ns):
     """
     for key in results:
         if key == "stdout":
-            f = codecs.EncodedFile(sys.stdout, data_encoding="UTF-8")
+            f = codecs.EncodedFile(sys.stdout, "UTF-8")
         else:
             try:
                 f = codecs.open(key, "w", encoding="UTF-8")
@@ -145,6 +123,7 @@ def cvrf_dispatch(cvrf_doc, parsables, collate_vuln, strip_ns):
     collate_vuln: boolean indicating whether or not to collate the vulnerabilities
     strip_ns: boolean that when true indicates the namespace prefix will be chomped
     returns: N/A
+
     """
     if parsables:
         results = cvrf_parse(cvrf_doc, parsables)
@@ -162,14 +141,20 @@ def cvrf_parse(cvrf_doc, parsables):
     parsables: list of elements to parse from a CVRF doc
     returns: a dictionary of the format {filename:[item, ...]}
     """
+
     items = []
+    elem_dict = {}
     for element in parsables:
         for node in cvrf_doc.iter(element):
             for child in node.iter():
+                elem_dict[chop_ns_prefix(child.tag)] = child.text
                 items.append(child)
-    # Hardcoded output for now, eventually make this user-tunable
-    return {"stdout": items}
+    return elem_dict
 
+def parse(file_name, elements):
+    cvrf_doc = etree.parse(file_name, etree.XMLParser(encoding="UTF-8"))
+    parsables = _create_parsables(elements)
+    return cvrf_parse(cvrf_doc, parsables)
 
 def cvrf_collate_vuln(cvrf_doc):
     """
@@ -195,7 +180,6 @@ def cvrf_collate_vuln(cvrf_doc):
 
 def post_process_arglist(arg, namespace, valid_args):
     parsables = []
-
     if CVRF_Syntax.NAMESPACES[namespace] + "all" in arg:
         for element in valid_args:
             parsables.append(CVRF_Syntax.NAMESPACES[namespace] + element)
@@ -203,89 +187,8 @@ def post_process_arglist(arg, namespace, valid_args):
     else:
         for element in arg:
             parsables.append(element)
-
     return parsables
 
-
-def main(progname = None):
-    progname = progname if progname else os.path.basename(sys.argv[0])
-    parser = argparse.ArgumentParser(formatter_class=NonDupBracketFormatter,
-                                     description="Validate/parse a CVRF 1.1 document and emit user-specified bits.")
-    parser.add_argument("-f", "--file", required="True", action="store",
-                        help="candidate CVRF 1.1 XML file")
-    parser.add_argument('--cvrf', nargs="*", choices=CVRF_Syntax.CVRF_ARGS,
-                        action=namespace_prepend("CVRF"),
-                        help="emit CVRF elements, use \"all\" to glob all CVRF elements.")
-    parser.add_argument("--vuln", nargs="*", choices=CVRF_Syntax.VULN_ARGS,
-                        action=namespace_prepend("VULN"),
-                        help="emit Vulnerability elements, use \"all\" to glob all Vulnerability elements.")
-    parser.add_argument("--prod", nargs="*", choices=CVRF_Syntax.PROD_ARGS,
-                        action=namespace_prepend("PROD"),
-                        help="emit ProductTree elements, use \"all\" to glob all ProductTree elements.")
-    parser.add_argument("-c", "--collate", dest="collate_vuln", default=False,
-                        action="store_true",
-                        help="collate all of the Vulnerability elements by ordinal into separate files")
-    parser.add_argument("-s", "--strip-ns", dest="strip_ns", default=False, action="store_true",
-                        help="strip namespace header from element tags before printing")
-    parser.add_argument("-V", "--validate", default=False, action="store_true",
-                        help="validate the CVRF document")
-    parser.add_argument("-S", "--schema", action="store",
-                        help="specify local alternative for cvrf.xsd")
-    parser.add_argument("-C", "--catalog", action="store",
-                        help="specify location for catalog.xml (default is {0})".format(CVRF_Syntax.CVRF_CATALOG))
-    parser.add_argument("-v", "--version", action="version", version="%(prog)s " + __revision__)
-
-    args = parser.parse_args()
-
-    # Post process argument lists into a single list, handling 'all' globs if present
-    # this block should probably eventually be folded into argparse
-    parsables = []
-    if args.cvrf:
-        parsables.extend(post_process_arglist(args.cvrf, "CVRF", CVRF_Syntax.CVRF_ARGS))
-    if args.vuln:
-        parsables.extend(post_process_arglist(args.vuln, "VULN", CVRF_Syntax.VULN_ARGS))
-    if args.prod:
-        parsables.extend(post_process_arglist(args.prod, "PROD", CVRF_Syntax.PROD_ARGS))
-
-    # First things first: parse the document (to ensure it is well-formed XML) to obtain an ElementTree object
-    # to pass to the CVRF validator/parser
-    try:
-        cvrf_doc = etree.parse(args.file, etree.XMLParser(encoding="utf-8"))
-    except IOError:
-        sys.exit("{0}: I/O error: \"{1}\" does not exist".format(progname, args.file))
-    except etree.XMLSyntaxError as e:
-        sys.exit("{0}: Parsing error, document \"{1}\" is not well-formed: {2}".format(progname, args.file, e.error_log.filter_from_level(etree.ErrorLevels.FATAL)))
-
-    if args.validate is True:
-        try:
-            if args.schema:
-                # Try to use local schema files
-                f = open(args.schema, 'r')
-                # If the supplied file is not a valid catalog.xml or doesn't exist lxml will fall back to
-                # using remote validation
-                catalog = args.catalog if args.catalog else CVRF_Syntax.CVRF_CATALOG
-                os.environ.update(XML_CATALOG_FILES=catalog)
-            else:
-                print >> sys.stderr, "Fetching schemata..."
-                f = urllib2.urlopen(CVRF_Syntax.CVRF_SCHEMA)
-        except IOError as e:
-            sys.exit("{0}: I/O error({1}) \"{2}\": {3}".format(progname, e.errno, args.schema, e.strerror))
-
-        (code, result) = cvrf_validate(f, cvrf_doc)
-        f.close()
-        if code is False:
-            sys.exit("{0}: {1}".format(progname, result))
-        else:
-            print >> sys.stderr, result
-
-    cvrf_dispatch(cvrf_doc, parsables, collate_vuln=args.collate_vuln, strip_ns=args.strip_ns)
-
 if __name__ == "__main__":
-    progname=os.path.basename(sys.argv[0])
-    try:
-        main(progname)
-    except Exception, value:
-        (exc_type, exc_value, exc_tb) = sys.exc_info()
-        sys.excepthook(exc_type, exc_value, exc_tb)     # if debugging
-        sys.exit("%s: %s: %s" % (progname, exc_type.__name__, exc_value))
-    sys.exit(0)
+    results = parse('sample-xml/cvrf.xml', ['DocumentTitle', 'DocumentType', 'ID'])
+    print results
