@@ -127,7 +127,7 @@ def cvrf_dump(results, strip_ns):
     """
     for key in results:
         if key == "stdout":
-            f = codecs.EncodedFile(sys.stdout, data_encoding="UTF-8")
+            f = codecs.EncodedFile(sys.stdout, "UTF-8")
         else:
             try:
                 f = codecs.open(key, "w", encoding="UTF-8")
